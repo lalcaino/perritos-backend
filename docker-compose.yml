@@ -1,0 +1,100 @@
+# docker-compose.yml
+# Orquesta los tres servicios de la Tienda de Perritos:
+# - tienda-db:      MySQL 8 con datos iniciales
+# - tienda-backend: Node.js/Express conectado a la DB
+# - tienda-frontend: Nginx sirviendo el frontend con proxy al backend
+#
+# Redes:
+#   backend_net:  conecta DB y backend (aislada del exterior)
+#   frontend_net: conecta backend y frontend
+#
+# Volumenes:
+#   tienda_db_data:      persiste los datos de MySQL entre reinicios
+#   tienda_backend_logs: persiste los logs del backend para auditoria
+
+version: "3.9"
+
+services:
+
+  tienda-db:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    image: lalcaino/tienda-perritos-db:latest
+    container_name: tienda-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: admin123
+      MYSQL_DATABASE: tienda_perritos
+      MYSQL_USER: alumno
+      MYSQL_PASSWORD: alumno123
+    volumes:
+      - tienda_db_data:/var/lib/mysql
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-padmin123"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  tienda-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lalcaino/tienda-perritos-backend:latest
+    container_name: tienda-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      DB_HOST: tienda-db
+      DB_PORT: 3306
+      DB_NAME: tienda_perritos
+      DB_USER: alumno
+      DB_PASSWORD: alumno123
+      NODE_ENV: production
+    volumes:
+      - tienda_backend_logs:/app/logs
+    networks:
+      - backend_net
+      - frontend_net
+    depends_on:
+      tienda-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  tienda-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: lalcaino/tienda-perritos-frontend:latest
+    container_name: tienda-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    networks:
+      - frontend_net
+    depends_on:
+      tienda-backend:
+        condition: service_healthy
+
+networks:
+  backend_net:
+    driver: bridge
+    name: tienda_backend_net
+  frontend_net:
+    driver: bridge
+    name: tienda_frontend_net
+
+volumes:
+  tienda_db_data:
+    name: tienda_db_data
+  tienda_backend_logs:
+    name: tienda_backend_logs
