@@ -1,0 +1,100 @@
+# ============================================================
+# CI/CD Pipeline — Backend Tienda Perritos
+# Trigger: push a rama 'deploy'
+# Flujo: Build imagen → Push Docker Hub → Deploy en EC2
+# ============================================================
+
+name: CI/CD Backend - Tienda Perritos
+
+on:
+  push:
+    branches:
+      - deploy   # Solo se activa con push a la rama deploy
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/tienda-perritos-backend
+
+jobs:
+
+  # ── JOB 1: Construir y publicar imagen Docker ─────────────
+  build-and-push:
+    name: Build & Push imagen Docker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx (soporte multi-platform)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extraer metadata para tags y labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build y Push de la imagen al registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── JOB 2: Desplegar en EC2 Backend ──────────────────────
+  deploy:
+    name: Deploy en EC2 Backend
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Deploy via SSH en EC2 Backend
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.EC2_BACKEND_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Login en Docker Hub desde la EC2
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | \
+              docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+            # Descargar la imagen más reciente
+            docker pull ${{ env.IMAGE_NAME }}:latest
+
+            # Detener y eliminar el contenedor anterior si existe
+            docker stop tienda-backend || true
+            docker rm   tienda-backend || true
+
+            # Levantar el nuevo contenedor con variables de entorno
+            docker run -d \
+              --name tienda-backend \
+              --network tienda_backend_net \
+              --restart unless-stopped \
+              -p 3001:3001 \
+              -e DB_HOST="${{ secrets.DB_HOST }}" \
+              -e DB_PORT="3306" \
+              -e DB_NAME="${{ secrets.DB_NAME }}" \
+              -e DB_USER="${{ secrets.DB_USER }}" \
+              -e DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+              -e NODE_ENV="production" \
+              ${{ env.IMAGE_NAME }}:latest
+
+            # Verificar que el contenedor está corriendo
+            docker ps | grep tienda-backend
+
+            # Limpiar imágenes antiguas
+            docker image prune -f
